@@ -1,0 +1,10 @@
+# Local face-match photo filter — CPU-only, fully offline after first model download.
+# Pinned to versions with CPU wheels available for Python 3.10–3.13.
+
+numpy>=1.26,<2.2
+onnxruntime>=1.17           # CPU inference runtime for the ONNX face models
+insightface>=0.7.3          # buffalo_l detection + 512-d ArcFace embeddings
+opencv-python-headless>=4.9 # image ops without GUI/Qt deps (server-friendly)
+Pillow>=10.2                # broad format decoding + EXIF orientation
+pillow-heif>=0.16           # HEIC/HEIF (iPhone) support for Pillow
+tqdm>=4.66                  # progress bars

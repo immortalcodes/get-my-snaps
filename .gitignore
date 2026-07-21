@@ -1,0 +1,16 @@
+# Ignore the local virtualenv and generated artifacts.
+.venv/
+
+# Resumable run state and cached reference embeddings (regenerated automatically).
+.gms_checkpoint.json
+.gms_checkpoint.json.tmp
+.gms_reference_cache.json
+.gms_embeddings/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# The output tree is generated; keep the folder but not its contents.
+output/*
+!output/.gitkeep
