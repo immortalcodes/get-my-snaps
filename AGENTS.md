@@ -7,6 +7,25 @@ A local, offline face-recognition photo filter. `input/` photos containing a
 person from `reference/<name>/` are **copied** into `output/`, mirroring the
 input tree. See [README.md](README.md) for user-facing docs.
 
+## Project layout (src/ package)
+The code is an installable package under `src/get_my_snaps/`; runtime data
+dirs (`input/`, `reference/`, `output/`) and caches (`.gms_*`) stay at the repo
+root (anchored on **cwd**, see config.py). Install editable with
+`pip install -e .` (or `-e ".[dev]"` for pytest). Entry points:
+`get-my-snaps` console script and `python -m get_my_snaps`, both →
+`get_my_snaps.cli:main`.
+
+- `src/get_my_snaps/` — the package. Modules import each other **relatively**
+  (`from . import console`, `from .config import Config`). Never reintroduce
+  top-level absolute imports (`import config`) — they break once installed.
+- `scripts/` — non-package helpers: `run_sample.sh` (bootstrap+demo, run from
+  repo root as `./scripts/run_sample.sh`) and `profile_run.py` (dev profiler;
+  imports the package via `from get_my_snaps... import`).
+- `tests/` — pytest suite; `conftest.py` adds `src/` to `sys.path` as a fallback
+  when the package isn't installed.
+- `pyproject.toml` — authoritative dependency + packaging metadata.
+  `requirements.txt` is now just a shim (`-e .`).
+
 ## Module boundaries (keep these clean)
 - **config.py** — every tunable (thresholds, batch size, model, detection params,
   reference-quality cutoffs, report limits) + all filesystem `Paths`. No logic.
@@ -24,6 +43,8 @@ input tree. See [README.md](README.md) for user-facing docs.
   `process_images` batch loop. No argparse.
 - **get_my_snaps.py** — CLI orchestration ONLY: argparse, wiring the modules
   together, and small step functions. No model/decoding/scoring logic here.
+  (Lives at `src/get_my_snaps/cli.py`; other module names below are also under
+  `src/get_my_snaps/`.)
 
 ## Embedding cache
 - Per-image face embeddings are cached in `.gms_embeddings/<sha1(rel_key)>.npz`
@@ -62,10 +83,15 @@ input tree. See [README.md](README.md) for user-facing docs.
   and the fresh-start prompt in `bootstrap_checkpoint` must stay aligned.
 
 ## Environment
-- Python 3.13, CPU-only. Deps in [requirements.txt](requirements.txt); install
-  into `.venv/` (git-ignored). Run everything via `.venv/bin/python`.
-- `./run_sample.sh` bootstraps the venv, installs deps, and does a hands-free dry
-  run for every reference person (`--real` to actually copy). Good first check.
+- Python 3.13, CPU-only. Deps declared in [pyproject.toml](pyproject.toml)
+  ([requirements.txt](requirements.txt) is a `-e .` shim). Install into `.venv/`
+  (git-ignored) with `pip install -e ".[dev]"`. Run everything via
+  `.venv/bin/python` or the `get-my-snaps` console script.
+- `./scripts/run_sample.sh` bootstraps the venv, installs the package, and does a
+  hands-free dry run for every reference person (`--real` to actually copy).
+  Good first check. Run it from the repo root.
+- `.venv/bin/python -m pytest` runs the suite (pure-logic tests for config +
+  checkpoint; no ML deps needed).
 - InsightFace `buffalo_l` auto-downloads once to `~/.insightface/` then works
   offline. `insightface` prints noisy provider/model lines and a `FutureWarning`
   from scikit-image on import — harmless; filter in logs if needed.

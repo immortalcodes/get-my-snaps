@@ -34,34 +34,46 @@ is the intended tuning loop: run once, then adjust the threshold quickly using t
 
 ```
 get-my-snaps/
-├── input/       # your source photos, in any nested folder structure
-├── reference/   # one subfolder per person: reference/<name>/*.jpg|*.heic|...
-├── output/      # matches are copied here, mirroring input/ (auto-created)
-├── get_my_snaps.py    # CLI orchestration (argparse + wiring)
-├── config.py          # all tunables + filesystem paths
-├── console.py         # user-facing output / prompts
-├── face_engine.py     # image loading + face detection/embeddings
-├── reference_check.py # reference enrollment + quality scoring
-├── matching.py        # checkpoint, embedding cache, scoring, copy, reports
-└── run_sample.sh      # one-command setup + demo run
+├── input/                 # your source photos, in any nested folder structure
+├── reference/             # one subfolder per person: reference/<name>/*.jpg|*.heic|...
+├── output/                # matches are copied here, mirroring input/ (auto-created)
+├── pyproject.toml         # packaging, deps, `get-my-snaps` console-script entry point
+├── requirements.txt       # convenience shim → installs this project (editable)
+├── src/
+│   └── get_my_snaps/      # the importable package
+│       ├── cli.py             # CLI orchestration (argparse + wiring)
+│       ├── config.py          # all tunables + filesystem paths
+│       ├── console.py         # user-facing output / prompts
+│       ├── face_engine.py     # image loading + face detection/embeddings
+│       ├── reference_check.py # reference enrollment + quality scoring
+│       ├── matching.py        # checkpoint, embedding cache, scoring, copy, reports
+│       ├── __main__.py        # enables `python -m get_my_snaps`
+│       └── __init__.py
+├── scripts/
+│   ├── run_sample.sh      # one-command setup + demo run
+│   └── profile_run.py     # dev-only performance profiler
+└── tests/                 # pytest suite
 ```
 
 ## Quick start
 
-The fastest way to see it work (creates the venv, installs deps, runs a
+The fastest way to see it work (creates the venv, installs the package, runs a
 non-destructive dry run for every person in `reference/`):
 
 ```bash
-./run_sample.sh          # dry run: reports matches, copies nothing
-./run_sample.sh --real   # actually copy matches into output/
+./scripts/run_sample.sh          # dry run: reports matches, copies nothing
+./scripts/run_sample.sh --real   # actually copy matches into output/
 ```
 
 ## Setup (manual)
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -e .        # or  -e ".[dev]"  to also get pytest
 ```
+
+Installing the project (`-e .`, editable) puts a `get-my-snaps` command on your
+PATH and lets code edits take effect without reinstalling.
 
 Then create a folder per person under `reference/` and drop 3–5 clear,
 front-facing photos of that person into each:
@@ -80,7 +92,9 @@ reference/
 Interactive (recommended the first time):
 
 ```bash
-.venv/bin/python get_my_snaps.py
+get-my-snaps                       # if the venv is activated
+.venv/bin/get-my-snaps             # or call it directly
+.venv/bin/python -m get_my_snaps   # equivalent module form
 ```
 
 You'll see a **reference quality report**, then a prompt to choose who to filter
@@ -91,13 +105,13 @@ Non-interactive / scripted:
 
 ```bash
 # Filter for specific people, skip prompts
-.venv/bin/python get_my_snaps.py --persons madhur priya --skip-ref-check
+get-my-snaps --persons madhur priya --skip-ref-check
 
 # See what would match without copying anything
-.venv/bin/python get_my_snaps.py --persons madhur --dry-run
+get-my-snaps --persons madhur --dry-run
 
 # Start completely fresh (ignore checkpoint + reference cache)
-.venv/bin/python get_my_snaps.py --reset
+get-my-snaps --reset
 ```
 
 ### Options
@@ -117,7 +131,7 @@ Non-interactive / scripted:
 
 ### Config file
 
-Every tunable has a default in `config.py`. To change several at once without
+Every tunable has a default in `src/get_my_snaps/config.py`. To change several at once without
 long command lines, put them in a JSON file and pass `--config`:
 
 ```json
@@ -130,12 +144,12 @@ long command lines, put them in a JSON file and pass `--config`:
 ```
 
 ```bash
-.venv/bin/python get_my_snaps.py --config my.json
+get-my-snaps --config my.json
 ```
 
 Precedence is: **defaults < config file < command-line flags**, so a flag like
 `--threshold` always wins over the file. Available keys match the fields in
-`config.py` (matching, detection/preprocessing, reference-quality thresholds,
+`src/get_my_snaps/config.py` (matching, detection/preprocessing, reference-quality thresholds,
 and reporting).
 
 ## Tuning the threshold (important for small faces)

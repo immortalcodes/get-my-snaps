@@ -28,11 +28,11 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import console
-from config import Config, Paths
-from face_engine import FaceEngine, is_supported_image
-from matching import Checkpoint, RunStats, process_images, write_candidates_report
-from reference_check import (
+from . import console
+from .config import Config, Paths
+from .face_engine import FaceEngine, is_supported_image
+from .matching import Checkpoint, RunStats, process_images, write_candidates_report
+from .reference_check import (
     PersonReference,
     enroll_references,
     format_report,
@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     left it alone" (use config/default) from "user set it" (override config).
     """
     p = argparse.ArgumentParser(
-        prog="get_my_snaps.py",
+        prog="get-my-snaps",
         description=(
             "Find every photo in input/ that contains a chosen person (from "
             "reference/<name>/) and copy it into output/, preserving the folder "

@@ -28,8 +28,8 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from config import Config
-from face_engine import FaceEngine, DetectedFace, load_image_bgr, is_supported_image
+from .config import Config
+from .face_engine import FaceEngine, DetectedFace, load_image_bgr, is_supported_image
 
 log = logging.getLogger(__name__)
 

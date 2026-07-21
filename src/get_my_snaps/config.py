@@ -25,8 +25,10 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-# Project root = the directory this file sits in. Everything is relative to it.
-ROOT = Path(__file__).resolve().parent
+# Project root = the current working directory, i.e. where the user runs the
+# tool from. Data lives alongside the user (input/, reference/, output/), not
+# next to the installed package code, so we anchor on cwd rather than __file__.
+ROOT = Path.cwd()
 
 
 @dataclass(frozen=True)

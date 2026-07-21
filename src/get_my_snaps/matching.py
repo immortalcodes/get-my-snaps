@@ -25,9 +25,9 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
-import console
-from config import Config, Paths
-from face_engine import FaceEngine, load_image_bgr
+from . import console
+from .config import Config, Paths
+from .face_engine import FaceEngine, load_image_bgr
 
 
 # ----------------------------------------------------------------------------

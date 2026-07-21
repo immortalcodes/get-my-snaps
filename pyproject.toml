@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "get-my-snaps"
+version = "0.1.0"
+description = "Local, fully-offline face-recognition photo filter (InsightFace, CPU)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Madhur Jain" }]
+keywords = ["face-recognition", "photos", "insightface", "offline", "cli"]
+
+# Runtime dependencies. Kept in sync with requirements.txt (which now just
+# points here via `pip install -e .`). CPU-only, offline after first model pull.
+dependencies = [
+    "numpy>=1.26,<2.2",
+    "onnxruntime>=1.17",
+    "insightface>=0.7.3",
+    "opencv-python-headless>=4.9",
+    "Pillow>=10.2",
+    "pillow-heif>=0.16",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+get-my-snaps = "get_my_snaps.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

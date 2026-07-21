@@ -11,6 +11,12 @@
 __pycache__/
 *.pyc
 
+# Packaging / build artifacts (from `pip install -e .` and builds)
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
 # The output tree is generated; keep the folder but not its contents.
 output/*
 !output/.gitkeep
