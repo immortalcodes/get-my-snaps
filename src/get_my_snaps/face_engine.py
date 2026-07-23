@@ -116,7 +116,7 @@ class FaceEngine:
 
     def __init__(
         self,
-        model_name: str = "buffalo_l",
+        model_name: str = "buffalo_s",
         det_size: int = 640,
         det_thresh: float = 0.35,
     ):
@@ -124,9 +124,11 @@ class FaceEngine:
         from insightface.app import FaceAnalysis
 
         log.info("Loading InsightFace model '%s' (CPU)...", model_name)
+        # we only use detection + recognition; no alignment or segmentation.
         self.app = FaceAnalysis(
             name=model_name,
             providers=["CPUExecutionProvider"],
+            allowed_modules=["detection", "recognition"],
         )
         # ctx_id=-1 forces CPU. det_thresh is intentionally a bit low to favor recall.
         self.app.prepare(ctx_id=-1, det_size=(det_size, det_size), det_thresh=det_thresh)
