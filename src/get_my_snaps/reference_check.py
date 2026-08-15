@@ -195,26 +195,6 @@ def enroll_person(
     return person
 
 
-def enroll_references(
-    reference_dir: Path,
-    engine: FaceEngine,
-    cfg: Config,
-) -> Dict[str, PersonReference]:
-    """
-    Walk reference/<name>/ folders and enroll each as a person.
-    Returns a dict name -> PersonReference (including 0-usable-face people).
-    """
-    people: Dict[str, PersonReference] = {}
-    person_dirs = sorted(p for p in reference_dir.iterdir() if p.is_dir())
-    if not person_dirs:
-        log.warning("No <name> subfolders found under %s", reference_dir)
-        return people
-    for pdir in person_dirs:
-        images = [p for p in sorted(pdir.rglob("*")) if p.is_file() and is_supported_image(p)]
-        people[pdir.name] = enroll_person(pdir.name, images, engine, cfg)
-    return people
-
-
 def resolve_ref_items(items: Iterable[Path]) -> Dict[str, List[Path]]:
     """Expand ``--of`` arguments into one-or-more people.
 
@@ -339,42 +319,3 @@ def format_report(people: Dict[str, PersonReference]) -> str:
             lines.append(f"    → {a}")
     lines.append("=" * 64 + "\n")
     return "\n".join(lines)
-
-
-def save_reference_cache(people: Dict[str, PersonReference], path: Path) -> None:
-    """Persist prototypes + metrics so re-runs can skip re-embedding."""
-    payload = {}
-    for name, p in people.items():
-        d = asdict(p)
-        d.pop("embeddings", None)
-        d["prototype"] = None if p.prototype is None else p.prototype.tolist()
-        payload[name] = d
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-
-def load_reference_cache(path: Path) -> Optional[Dict[str, PersonReference]]:
-    """Load a previously saved reference cache, or None if absent/unreadable."""
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    people: Dict[str, PersonReference] = {}
-    for name, d in payload.items():
-        proto = d.get("prototype")
-        person = PersonReference(
-            name=name,
-            prototype=None if proto is None else np.asarray(proto, dtype=np.float32),
-            total_images=d.get("total_images", 0),
-            usable_images=d.get("usable_images", 0),
-            multi_face_images=d.get("multi_face_images", 0),
-            zero_face_images=d.get("zero_face_images", 0),
-            avg_det_score=d.get("avg_det_score", 0.0),
-            avg_face_frac=d.get("avg_face_frac", 0.0),
-            consistency=d.get("consistency", 0.0),
-            rating=d.get("rating", "Poor"),
-            advice=d.get("advice", []),
-        )
-        people[name] = person
-    return people

@@ -53,26 +53,46 @@ def error(msg: str) -> None:
 
 
 def prompt(msg: str) -> str:
-    """Ask the user for input and return the trimmed, lower-cased answer."""
+    """Ask the user for input and return the trimmed, lower-cased answer.
+
+    When stdin isn't a terminal (piped/scripted/snap runs that must never hang)
+    we return the empty string, which callers treat as the default answer.
+    """
+    import sys
+
+    if not sys.stdin.isatty():
+        return ""
     return input(msg).strip().lower()
 
 
 # --- flow messages (dynamic ones are builders, static ones are constants) -
 ENROLLING = "Enrolling reference people and scoring quality..."
-REF_CACHE_LOADED = "Loaded cached reference data (use --reset to re-enroll)."
+REF_CACHE_LOADED = "Loaded cached reference data."
 NOTHING_NEW = "Nothing new to process. Done."
 ABORTED_POOR = "Aborted. Improve the reference photos (see advice above) and re-run."
+MODEL_FETCH_NOTICE = (
+    "First run: downloading the face-recognition model to the shared cache "
+    "(one time, then fully offline). This can take a moment depending on your "
+    "connection."
+)
 
 
 def empty_reference(reference_dir) -> str:
     return (
-        f"'{reference_dir}' is empty. Add reference/<name>/ folders with "
-        "photos of each person, then re-run."
+        f"'{reference_dir}' is empty. Pass --of <photo-or-folder>, or add "
+        "reference/<name>/ folders with photos of each person, then re-run."
     )
 
 
 def missing_input(input_dir) -> str:
-    return f"input folder not found at {input_dir}."
+    return (
+        f"'{input_dir}' was not found. Pass a source directory of photos to "
+        "scan, e.g.  get-my-snaps ~/Pictures --of ~/me.jpg"
+    )
+
+
+def missing_source(source) -> str:
+    return f"source path '{source}' is not a directory."
 
 
 def filtering_for(persons: Iterable[str]) -> str:

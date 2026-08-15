@@ -149,7 +149,7 @@ def get_face_embeddings(
         if faces
         else np.zeros((0, 512), dtype=np.float16)
     )
-    paths.embeddings_cache.mkdir(parents=True, exist_ok=True)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(cache_path, emb=emb, recipe=rec, src=str(src))
     return emb.astype(np.float32)
 
@@ -194,7 +194,7 @@ def append_manifest(rows: List[Tuple[str, str, str]], paths: Paths) -> None:
     """Append (relative_path, persons, scores) rows to output/manifest.csv."""
     if not rows:
         return
-    paths.output.mkdir(parents=True, exist_ok=True)
+    paths.out.mkdir(parents=True, exist_ok=True)
     new_file = not paths.manifest.exists()
     with paths.manifest.open("a", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
@@ -217,7 +217,7 @@ def write_candidates_report(
         rows.append((best[top_person], top_person, rel_key))
     rows.sort(reverse=True)
 
-    paths.output.mkdir(parents=True, exist_ok=True)
+    paths.out.mkdir(parents=True, exist_ok=True)
     with paths.candidates.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(["best_score", "best_person", "relative_path", "crosses_threshold"])
@@ -276,7 +276,7 @@ def process_images(
         pending_manifest.clear()
 
     for src in _progress(todo):
-        rel = src.relative_to(paths.input)
+        rel = src.relative_to(paths.source)
         rel_key = rel.as_posix()
 
         face_mat = get_face_embeddings(engine, src, rel_key, cfg, paths)
@@ -293,7 +293,7 @@ def process_images(
             stats.matched += 1
             ckpt.processed[rel_key] = {"status": "matched", "best": best_round}
             if not dry_run:
-                if copy_match(src, rel, paths.output):
+                if copy_match(src, rel, paths.out):
                     stats.copied += 1
                 pending_manifest.append(
                     (

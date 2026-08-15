@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 """
-get_my_snaps.py — CLI orchestration.
+cli.py -- CLI orchestration.
 
-Copies every input photo that contains a chosen reference person into ``output/``,
-mirroring the input folder tree. Fully offline (InsightFace, CPU).
+Copies every photo containing a chosen reference person into an output folder,
+mirroring the source's folder tree. Works two ways:
 
-This module is deliberately thin: it wires together the specialised modules and
-owns nothing but the command-line flow.
+  get-my-snaps ~/Pictures --of ~/me.jpg        # ad-hoc person reference
+  get-my-snaps                                 # legacy input//reference/ layout
+
+Fully offline after a one-time model fetch (InsightFace, CPU). This module is
+deliberately thin: it wires together the specialised modules and owns nothing
+but the command-line flow.
 
     config.py          all tunables + paths
     console.py         user-facing output/prompts
+    cache.py           embedding/prototype keying (provenance)
     face_engine.py     image decoding + face detection/embeddings
-    reference_check.py reference enrollment + quality scoring
+    reference_check.py reference enrollment, quality, --of resolution
     matching.py        checkpoint, embedding cache, scoring, copy, reports, loop
 
-Pipeline: enroll references -> pick people -> discover input -> match in resumable
-batches -> copy matches + write reports. Recall is favoured over precision (low
-default threshold) so relevant photos are rarely missed.
+Pipeline: resolve source+references -> enroll/load people -> match in resumable
+batches -> copy matches + write reports.
 """
 
 from __future__ import annotations
@@ -26,18 +30,20 @@ import logging
 import shutil
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from . import console
+from .cache import recipe, samples_key
 from .config import Config, Paths
-from .face_engine import FaceEngine, is_supported_image
+from .face_engine import FaceEngine, model_available, is_supported_image
 from .matching import Checkpoint, RunStats, process_images, write_candidates_report
 from .reference_check import (
     PersonReference,
-    enroll_references,
     format_report,
-    load_reference_cache,
-    save_reference_cache,
+    enroll_person,
+    load_cached_person,
+    resolve_ref_items,
+    save_person,
 )
 
 log = logging.getLogger("get_my_snaps")
@@ -61,20 +67,43 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="get-my-snaps",
         description=(
-            "Find every photo in input/ that contains a chosen person (from "
-            "reference/<name>/) and copy it into output/, preserving the folder "
-            "tree. Fully offline, CPU-only face recognition."
+            "Find every photo in a source folder that contains a chosen person "
+            "and copy it into an output folder, preserving the folder tree. "
+            "Fully offline, CPU-only face recognition."
         ),
         formatter_class=_HelpFormatter,
         epilog=(
             "Examples:\n"
-            "  get_my_snaps.py                         interactive, all defaults\n"
-            "  get_my_snaps.py --persons madhur priya  skip the picker\n"
-            "  get_my_snaps.py --dry-run               report matches, copy nothing\n"
-            "  get_my_snaps.py --threshold 0.16        widen recall (re-scores fast)\n"
-            "  get_my_snaps.py --config my.json        load tunables from a file\n"
+            "  get-my-snaps ~/Pictures/wedding --of ~/me.jpg   find few photos of\n"
+            "                                                  one person from a folder\n"
+            "  get-my-snaps ~/Pictures --of ~/me/              folder = all samples of\n"
+            "                                                  one person 'me'\n"
+            "  get-my-snaps --of a.jpg b.jpg --name me         bare photos = one person\n"
+            "  get-my-snaps ~/Pictures --of reference/         folder of subfolders =\n"
+            "                                                  one person each\n"
+            "  get-my-snaps --persons madhur priya             legacy reference/<name>/\n"
+            "  get-my-snaps --dry-run                          report matches, copy nothing\n"
         ),
     )
+
+    loc = p.add_argument_group("source & output")
+    loc.add_argument("source", nargs="?", type=Path, default=None,
+                     help="Directory of photos to scan (default: ./input if present).")
+    loc.add_argument("-o", "--out", type=Path, default=None,
+                     help="Output dir. Default: ./output for the legacy input//reference/ "
+                          "layout, else ./get-my-snaps-out.")
+
+    people = p.add_argument_group("people (pick ONE of --of or --persons)")
+    people.add_argument("--of", dest="of_refs", nargs="+", type=Path, default=None,
+                        help="Reference photo(s)/folder(s) for the person(s) to find. "
+                             "A folder with images = one person; a folder with only "
+                             "subfolders = one person each; multiple bare files = one "
+                             "person (renamed with --name).")
+    people.add_argument("--name", default=None,
+                        help="Name for the single --of person (bare files or a folder).")
+    people.add_argument("--persons", nargs="*", default=None,
+                        help="Person folder names under reference/ to filter for "
+                             "(legacy selection; skips the picker).")
 
     tuning = p.add_argument_group("tuning (override the config file / defaults)")
     tuning.add_argument("--threshold", type=float, default=None,
@@ -82,13 +111,9 @@ def build_parser() -> argparse.ArgumentParser:
     tuning.add_argument("--batch-size", type=int, default=None,
                         help="Images processed per checkpoint flush.")
     tuning.add_argument("--model", choices=["buffalo_l", "buffalo_s"], default=None,
-                        help="Face model; buffalo_s is faster but less accurate.")
+                        help="Face model; buffalo_s is the default (faster).")
     tuning.add_argument("--config", type=Path, default=None,
                         help="Path to a JSON config file of tunables.")
-
-    selection = p.add_argument_group("selection")
-    selection.add_argument("--persons", nargs="*", default=None,
-                           help="Person folder names to filter for (skips the prompt).")
 
     behaviour = p.add_argument_group("behaviour")
     behaviour.add_argument("--dry-run", action="store_true",
@@ -96,10 +121,11 @@ def build_parser() -> argparse.ArgumentParser:
     behaviour.add_argument("--skip-ref-check", action="store_true",
                            help="Don't pause even if a selected person rates Poor.")
     behaviour.add_argument("--reset", action="store_true",
-                           help="Ignore/overwrite checkpoint + reference cache "
-                                "(keeps the input embedding cache).")
+                           help="Ignore/overwrite the checkpoint for this run.")
     behaviour.add_argument("--reset-embeddings", action="store_true",
-                           help="Also clear cached input embeddings (use if input changed).")
+                           help="Also clear cached input embeddings.")
+    behaviour.add_argument("--reset-refs", action="store_true",
+                           help="Also force re-enrollment of reference people.")
     behaviour.add_argument("--verbose", action="store_true", help="Verbose logging.")
     return p
 
@@ -107,39 +133,121 @@ def build_parser() -> argparse.ArgumentParser:
 # ----------------------------------------------------------------------------
 # Small orchestration steps
 # ----------------------------------------------------------------------------
-def validate_workspace(paths: Paths) -> Optional[int]:
-    """Return an exit code if the workspace isn't ready, else None."""
-    if not paths.reference.is_dir() or not any(paths.reference.iterdir()):
-        console.error(console.empty_reference(paths.reference))
-        return 2
-    if not paths.input.is_dir():
-        console.error(console.missing_input(paths.input))
-        return 2
-    return None
+def default_out_dir(source: Path, cwd: Path) -> Path:
+    """Choose the output dir, preserving the legacy layout when detected."""
+    if source == cwd / "input" and (cwd / "reference").is_dir():
+        return cwd / "output"
+    return cwd / "get-my-snaps-out"
 
 
-def apply_resets(args: argparse.Namespace, paths: Paths) -> None:
-    """Honour --reset / --reset-embeddings before anything reads those files."""
+def resolve_source(args, cwd: Path) -> Path:
+    """The explicit SOURCE, or ./input when present, else a fatal error."""
+    if args.source is not None:
+        source = args.source
+        if not source.is_dir():
+            console.error(console.missing_source(source))
+            raise SystemExit(2)
+        return source
+    source = cwd / "input"
+    if not source.is_dir():
+        console.error(console.missing_input(source))
+        raise SystemExit(2)
+    return source
+
+
+def apply_resets(args, paths: Paths) -> None:
+    """Honour the reset flags before anything reads those files."""
     if args.reset:
         paths.checkpoint.unlink(missing_ok=True)
-        paths.reference_cache.unlink(missing_ok=True)
-    if args.reset_embeddings and paths.embeddings_cache.exists():
-        shutil.rmtree(paths.embeddings_cache)
+    if args.reset_embeddings:
+        shutil.rmtree(paths.embeddings_cache, ignore_errors=True)
+    if args.reset_refs:
+        shutil.rmtree(paths.central / "references", ignore_errors=True)
 
 
-def load_or_enroll_references(
-    engine: FaceEngine, cfg: Config, paths: Paths, reset: bool
+def _reference_people(
+    engine: FaceEngine, cfg: Config, paths: Paths, reference_dir: Path
 ) -> Dict[str, PersonReference]:
-    """Enroll reference people, using the on-disk cache unless --reset was given."""
-    people = None if reset else load_reference_cache(paths.reference_cache)
-    if people is None:
-        console.step(console.ENROLLING)
-        people = enroll_references(paths.reference, engine, cfg)
-        save_reference_cache(people, paths.reference_cache)
-    else:
-        console.step(console.REF_CACHE_LOADED)
-    console.info(format_report(people))
+    """Enroll/load every reference/<name>/ person into the shared cache.
+
+    Each person is cached under the current recipe, content-keyed so a changed
+    photo set re-enrolls only that person.
+    """
+    rec = recipe(cfg.model_name, cfg.det_size, cfg.det_thresh, cfg.max_long_edge)
+    people: Dict[str, PersonReference] = {}
+    if not reference_dir.is_dir():
+        return people
+    for pdir in sorted(reference_dir.iterdir()):
+        if not pdir.is_dir():
+            continue
+        images = sorted(
+            p for p in pdir.rglob("*") if p.is_file() and is_supported_image(p)
+        )
+        if not images:
+            continue
+        name = pdir.name
+        key = samples_key(images)
+        person = load_cached_person(paths.central, rec, name, key)
+        if person is None:
+            person = enroll_person(name, images, engine, cfg)
+            save_person(person, paths.central, rec)
+        people[name] = person
     return people
+
+
+def _of_people(
+    engine: FaceEngine,
+    cfg: Config,
+    paths: Paths,
+    of_refs: List[Path],
+    name_override: Optional[str],
+) -> Dict[str, PersonReference]:
+    """Enroll/load the people described by --of (no picker)."""
+    rec = recipe(cfg.model_name, cfg.det_size, cfg.det_thresh, cfg.max_long_edge)
+    resolved = resolve_ref_items(of_refs)
+
+    if name_override is not None:
+        if len(resolved) != 1:
+            console.error("--name only applies when --of describes exactly one person.")
+            raise SystemExit(2)
+        only = next(iter(resolved))
+        resolved = {name_override: resolved[only]}
+
+    people: Dict[str, PersonReference] = {}
+    for name, images in resolved.items():
+        key = samples_key(images)
+        person = load_cached_person(paths.central, rec, name, key)
+        if person is None:
+            person = enroll_person(name, images, engine, cfg)
+            save_person(person, paths.central, rec)
+        people[name] = person
+    return people
+
+
+def load_and_pick_people(
+    engine: FaceEngine,
+    cfg: Config,
+    paths: Paths,
+    args,
+    reference_dir: Path,
+) -> Tuple[Dict[str, PersonReference], List[str]]:
+    """Resolve the reference people and the list of whom to filter for."""
+    if args.of_refs:
+        people = _of_people(engine, cfg, paths, args.of_refs, args.name)
+        if not people:
+            console.error("No usable reference people. Aborting.")
+            raise SystemExit(2)
+        persons = list(people.keys())
+    else:
+        people = _reference_people(engine, cfg, paths, reference_dir)
+        if not people:
+            console.error(console.empty_reference(reference_dir))
+            raise SystemExit(2)
+        console.step(console.ENROLLING if args.persons is not None else "")
+        persons = choose_persons(people, args.persons)
+
+    console.info(format_report(people))
+    return people, persons
 
 
 def choose_persons(
@@ -199,24 +307,29 @@ def bootstrap_checkpoint(
     persons: List[str], cfg: Config, paths: Paths, reset: bool
 ) -> Checkpoint:
     """Load a compatible checkpoint or start a fresh one for this configuration."""
+    rec = recipe(cfg.model_name, cfg.det_size, cfg.det_thresh, cfg.max_long_edge)
+    sources = str(paths.source.resolve())
     ckpt = None if reset else Checkpoint.load(paths.checkpoint)
-    if ckpt is not None and not ckpt.matches_config(persons, cfg.threshold):
-        console.step("Checkpoint was made with different persons/threshold.")
+    if ckpt is not None and not ckpt.matches_config(persons, cfg.threshold, rec, sources):
+        console.step("Checkpoint was made with different persons/model/source.")
         if console.prompt("Start fresh for this configuration? [Y/n]: ") in ("", "y", "yes"):
             ckpt = None
     if ckpt is None:
-        ckpt = Checkpoint(persons=persons, threshold=cfg.threshold, processed={})
+        ckpt = Checkpoint(
+            persons=persons, threshold=cfg.threshold,
+            recipe=rec, sources=sources, processed={},
+        )
     return ckpt
 
 
 def discover_pending(ckpt: Checkpoint, paths: Paths) -> tuple[List[Path], int]:
     """Return (images still to process, count already processed)."""
     all_images = sorted(
-        p for p in paths.input.rglob("*") if p.is_file() and is_supported_image(p)
+        p for p in paths.source.rglob("*") if p.is_file() and is_supported_image(p)
     )
     todo = [
         p for p in all_images
-        if p.relative_to(paths.input).as_posix() not in ckpt.processed
+        if p.relative_to(paths.source).as_posix() not in ckpt.processed
     ]
     return todo, len(all_images) - len(todo)
 
@@ -231,7 +344,7 @@ def report_summary(
     suffix = " [dry-run: nothing copied]" if dry_run else ""
     console.success(
         f"Matched {matched} image(s); copied {stats.copied} new file(s) "
-        f"to {paths.output}.{suffix}"
+        f"to {paths.out}.{suffix}"
     )
     if not dry_run and matched:
         console.info(f"Audit trail: {paths.manifest}")
@@ -253,25 +366,33 @@ def main() -> int:
         format="%(levelname)s: %(message)s",
     )
 
-    paths = Paths()
     cfg = Config.load(args.config).with_overrides(
         threshold=args.threshold,
         batch_size=args.batch_size,
         model_name=args.model,
     )
-
-    bad = validate_workspace(paths)
-    if bad is not None:
-        return bad
+    cwd = Path.cwd()
+    source = resolve_source(args, cwd)
+    out = args.out or default_out_dir(source, cwd)
+    paths = Paths.for_run(source=source, out=out)
     apply_resets(args, paths)
 
+    if not model_available(paths.model_root, cfg.model_name):
+        console.warn(
+            console.MODEL_FETCH_NOTICE
+            + f"\n    -> {cfg.model_name} model will be stored under "
+            f"{paths.model_root / 'models'}"
+        )
+
     engine = FaceEngine(
-        model_name=cfg.model_name, det_size=cfg.det_size, det_thresh=cfg.det_thresh
+        model_name=cfg.model_name,
+        det_size=cfg.det_size,
+        det_thresh=cfg.det_thresh,
+        model_root=paths.model_root,
     )
 
-    people = load_or_enroll_references(engine, cfg, paths, args.reset)
-    persons = choose_persons(people, args.persons)
-    console.step(console.filtering_for(persons))
+    reference_dir = cwd / "reference"
+    people, persons = load_and_pick_people(engine, cfg, paths, args, reference_dir)
 
     if not confirm_poor_references(people, persons, args.skip_ref_check):
         return 0
