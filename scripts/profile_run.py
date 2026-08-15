@@ -29,6 +29,7 @@ import io
 import os
 import pstats
 import time
+from pathlib import Path
 
 
 def main() -> int:
@@ -48,11 +49,12 @@ def main() -> int:
     from get_my_snaps.config import Config, Paths
     from get_my_snaps.face_engine import FaceEngine, load_image_bgr, is_supported_image
 
-    paths = Paths()
+    source = Path("input")
+    paths = Paths.for_run(source=source, out=Path("output"))
     cfg = Config().with_overrides(model_name=args.model)
 
     images = sorted(
-        p for p in paths.input.rglob("*") if p.is_file() and is_supported_image(p)
+        p for p in paths.source.rglob("*") if p.is_file() and is_supported_image(p)
     )
     if not images:
         print("No input images found.")
@@ -65,7 +67,10 @@ def main() -> int:
     print("Loading model...")
     t0 = time.perf_counter()
     engine = FaceEngine(
-        model_name=cfg.model_name, det_size=cfg.det_size, det_thresh=cfg.det_thresh
+        model_name=cfg.model_name,
+        det_size=cfg.det_size,
+        det_thresh=cfg.det_thresh,
+        model_root=paths.model_root,
     )
     print(f"Model load: {time.perf_counter() - t0:.1f}s\n")
 
