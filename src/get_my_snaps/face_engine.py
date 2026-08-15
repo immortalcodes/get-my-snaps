@@ -36,6 +36,17 @@ except Exception as exc:  # pragma: no cover - environment dependent
 
 log = logging.getLogger(__name__)
 
+
+def model_available(model_root: Optional[Path], model_name: str) -> bool:
+    """True if the model's weights already exist under ``model_root``.
+
+    InsightFace looks for ``<root>/models/<name>/``. This is a pure filesystem
+    check (no download, no engine) so the CLI can warn before the slow path.
+    """
+    base = Path(model_root) if model_root is not None else Path("~/.insightface").expanduser()
+    return (base / "models" / model_name).is_dir()
+
+
 # Extensions we attempt to decode. Matched case-insensitively against the suffix.
 SUPPORTED_EXTS = {
     ".jpg",
@@ -116,17 +127,23 @@ class FaceEngine:
 
     def __init__(
         self,
-        model_name: str = "buffalo_s",
+        model_name: str,
         det_size: int = 640,
         det_thresh: float = 0.35,
+        model_root: Optional[Path] = None,
     ):
         # Imported lazily so `--help` and arg parsing don't pay the heavy import cost.
         from insightface.app import FaceAnalysis
 
-        log.info("Loading InsightFace model '%s' (CPU)...", model_name)
+        # model_name is required: Config is the single source of truth for which
+        # model to use. model_root redirects where weights live -- essential
+        # under snap strict confinement, where ~/.insightface is unwritable.
+        root = str(model_root) if model_root is not None else "~/.insightface"
+        log.info("Loading InsightFace model '%s' (CPU) from %s ...", model_name, root)
         # we only use detection + recognition; no alignment or segmentation.
         self.app = FaceAnalysis(
             name=model_name,
+            root=root,
             providers=["CPUExecutionProvider"],
             allowed_modules=["detection", "recognition"],
         )
