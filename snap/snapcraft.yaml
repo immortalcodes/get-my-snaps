@@ -1,0 +1,40 @@
+name: get-my-snaps
+base: core24
+version: '0.1.0'
+summary: Local, offline face-recognition photo filter
+description: |
+  Copies every photo containing a chosen person from a source folder into an
+  output folder, mirroring the folder tree. Fully offline, CPU-only face
+  recognition (InsightFace on ONNX Runtime) after a one-time model fetch.
+
+    get-my-snaps ~/Pictures/wedding --of ~/me.jpg
+
+  Run-state lives under the output dir (<out>/.gms/); the model and reference
+  prototypes live in $SNAP_USER_COMMON so they're shared and survive refreshes.
+grade: stable
+confinement: strict
+
+apps:
+  get-my-snaps:
+    command: bin/get-my-snaps
+    plugs:
+      - home            # read source photos (e.g. ~/Pictures), write output dir
+      - removable-media # read photos from /media (USB/SD); connect manually:
+                        #   sudo snap connect get-my-snaps:removable-media
+      - network         # only the one-time model fetch on first run
+
+parts:
+  get-my-snaps:
+    plugin: python
+    source: .
+    python-packages:
+      - numpy>=1.26,<2.2
+      - onnxruntime>=1.17
+      - insightface==0.7.3
+      - opencv-python-headless>=4.9
+      - Pillow>=10.2
+      - pillow-heif>=0.16
+      - tqdm>=4.66
+    build-packages:
+      - build-essential   # insightface is sdist-only and compiles Cython code
+      - python3-dev
