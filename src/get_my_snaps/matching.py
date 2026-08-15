@@ -16,7 +16,6 @@ filenames stay safe and consistent across dedup, resume, and reports.
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 import shutil
 from dataclasses import dataclass, field
@@ -26,6 +25,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import numpy as np
 
 from . import console
+from .cache import embedding_path, image_digest, recipe
 from .config import Config, Paths
 from .face_engine import FaceEngine, load_image_bgr
 
@@ -45,6 +45,11 @@ class Checkpoint:
     persons: List[str]
     threshold: float
     processed: Dict[str, dict] = field(default_factory=dict)
+    # Which embedding recipe and which source tree this checkpoint covers, so a
+    # checkpoint made under a different model or photo pool is rejected instead
+    # of being silently resumed against the wrong vectors.
+    recipe: str = ""
+    sources: str = ""
 
     @classmethod
     def load(cls, path: Path) -> Optional["Checkpoint"]:
@@ -56,6 +61,8 @@ class Checkpoint:
                 persons=d["persons"],
                 threshold=d["threshold"],
                 processed=d.get("processed", {}),
+                recipe=d.get("recipe", ""),
+                sources=d.get("sources", ""),
             )
         except (json.JSONDecodeError, KeyError, OSError) as exc:
             console.warn(f"Ignoring unreadable checkpoint ({exc}).")
@@ -71,6 +78,8 @@ class Checkpoint:
                     "persons": self.persons,
                     "threshold": self.threshold,
                     "processed": self.processed,
+                    "recipe": self.recipe,
+                    "sources": self.sources,
                 },
                 ensure_ascii=False,
             ),
@@ -78,26 +87,28 @@ class Checkpoint:
         )
         tmp.replace(path)
 
-    def matches_config(self, persons: List[str], threshold: float) -> bool:
-        """True if this checkpoint was made for the same persons + threshold."""
-        return sorted(self.persons) == sorted(persons) and abs(
-            self.threshold - threshold
-        ) <= 1e-9
+    def matches_config(
+        self,
+        persons: List[str],
+        threshold: float,
+        recipe: str = "",
+        sources: str = "",
+    ) -> bool:
+        """True if made for the same persons, threshold, recipe, and source.
+
+        Empty recipe/sources (legacy checkpoints, or callers that don't care)
+        never cause a mismatch.
+        """
+        same_set = sorted(self.persons) == sorted(persons)
+        same_thresh = abs(self.threshold - threshold) <= 1e-9
+        same_recipe = not recipe or self.recipe == recipe
+        same_sources = not sources or self.sources == sources
+        return same_set and same_thresh and same_recipe and same_sources
 
 
 # ----------------------------------------------------------------------------
 # Embedding cache
 # ----------------------------------------------------------------------------
-def _embedding_cache_path(cache_dir: Path, rel_key: str) -> Path:
-    """Deterministic cache file for one image's face embeddings.
-
-    Keyed by a hash of the input-relative path, so arbitrary filenames (spaces,
-    unicode, '(1)' collisions) map to safe, unique cache filenames.
-    """
-    digest = hashlib.sha1(rel_key.encode("utf-8")).hexdigest()
-    return cache_dir / f"{digest}.npz"
-
-
 def get_face_embeddings(
     engine: FaceEngine, src: Path, rel_key: str, cfg: Config, paths: Paths
 ) -> Optional[np.ndarray]:
@@ -106,13 +117,27 @@ def get_face_embeddings(
     Loads from the on-disk cache when present; otherwise detects + embeds and
     caches the result. This makes changing --threshold/--persons a fast re-score
     instead of a full re-run. Returns None only if the image can't be decoded.
+
+    The cache is provenance-scoped: namespaced by the embedding *recipe*
+    (model + detection settings) and keyed by a digest of (absolute source
+    root, relative key, size, mtime), so two sources or an edited image never
+    collide with a stale vector.
     """
-    cache_path = _embedding_cache_path(paths.embeddings_cache, rel_key)
+    rec = recipe(cfg.model_name, cfg.det_size, cfg.det_thresh, cfg.max_long_edge)
+    st = src.stat()
+    digest = image_digest(src.absolute(), rel_key, st.st_size, st.st_mtime_ns)
+    cache_path = embedding_path(paths.embeddings_cache, rec, digest)
+
     if cache_path.exists():
         try:
-            return np.load(cache_path)["emb"].astype(np.float32)
+            z = np.load(cache_path)
+            # Provenance guard: only trust the entry if it claims the same
+            # recipe and source we're asking for. A hash collision or a stray
+            # file from another context is recomputed, never trusted.
+            if z.get("recipe") == rec and z.get("src") == str(src):
+                return z["emb"].astype(np.float32)
         except Exception:
-            pass  # corrupt cache entry -> recompute below
+            pass  # corrupt or mismatched cache entry -> recompute below
 
     bgr = load_image_bgr(src, max_long_edge=cfg.max_long_edge)
     if bgr is None:
@@ -125,7 +150,7 @@ def get_face_embeddings(
         else np.zeros((0, 512), dtype=np.float16)
     )
     paths.embeddings_cache.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(cache_path, emb=emb)
+    np.savez_compressed(cache_path, emb=emb, recipe=rec, src=str(src))
     return emb.astype(np.float32)
 
 
