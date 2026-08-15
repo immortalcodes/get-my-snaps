@@ -22,12 +22,15 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 
+from . import console
+from .cache import samples_key
 from .config import Config
 from .face_engine import FaceEngine, DetectedFace, load_image_bgr, is_supported_image
 
@@ -39,6 +42,10 @@ class PersonReference:
     name: str
     prototype: Optional[np.ndarray]  # (512,) float32 mean embedding, or None if empty
     embeddings: List[np.ndarray] = field(default_factory=list)
+    # fingerprint of the sample set this prototype was computed from, so a
+    # changed/added photo invalidates it without a manual reset
+    samples_key: str = ""
+    # quality metrics (kept below for b/c with cached payloads)
     # quality metrics
     total_images: int = 0
     usable_images: int = 0
@@ -138,62 +145,176 @@ def _pick_best_face(faces: List[DetectedFace]) -> DetectedFace:
     return max(faces, key=lambda f: (f.bbox_area, f.det_score))
 
 
+def enroll_person(
+    name: str,
+    image_paths: Iterable[Path],
+    engine: FaceEngine,
+    cfg: Config,
+) -> PersonReference:
+    """Embed one person's sample photos and compute quality metrics.
+
+    image_paths may come from a reference/<name>/ folder or a bare --of list;
+    enrollment is identical either way. Returns the PersonReference (including
+    people with 0 usable faces, so the caller can report them).
+    """
+    images = sorted(p for p in image_paths if p.is_file() and is_supported_image(p))
+    person = PersonReference(name=name, prototype=None, total_images=len(images))
+
+    det_scores: List[float] = []
+    face_fracs: List[float] = []
+
+    for img_path in images:
+        bgr = load_image_bgr(img_path, max_long_edge=cfg.max_long_edge)
+        if bgr is None:
+            continue
+        img_area = float(bgr.shape[0] * bgr.shape[1])
+        faces = engine.embed_faces(bgr)
+
+        if not faces:
+            person.zero_face_images += 1
+            continue
+        if len(faces) > 1:
+            person.multi_face_images += 1
+
+        best = _pick_best_face(faces)
+        person.embeddings.append(best.embedding)
+        person.usable_images += 1
+        det_scores.append(best.det_score)
+        face_fracs.append(best.bbox_area / img_area if img_area else 0.0)
+
+    if person.embeddings:
+        proto = np.mean(np.vstack(person.embeddings), axis=0)
+        proto = proto / (np.linalg.norm(proto) + 1e-9)
+        person.prototype = proto.astype(np.float32)
+        person.avg_det_score = float(np.mean(det_scores))
+        person.avg_face_frac = float(np.mean(face_fracs))
+        person.consistency = _consistency(person.embeddings)
+
+    _rate(person, cfg)
+    person.samples_key = samples_key(images)
+    return person
+
+
 def enroll_references(
     reference_dir: Path,
     engine: FaceEngine,
     cfg: Config,
 ) -> Dict[str, PersonReference]:
     """
-    Walk reference/<name>/ folders, embed faces, and compute quality metrics.
-    Returns a dict name -> PersonReference (including people with 0 usable faces,
-    so the caller can report them).
+    Walk reference/<name>/ folders and enroll each as a person.
+    Returns a dict name -> PersonReference (including 0-usable-face people).
     """
     people: Dict[str, PersonReference] = {}
-
     person_dirs = sorted(p for p in reference_dir.iterdir() if p.is_dir())
     if not person_dirs:
         log.warning("No <name> subfolders found under %s", reference_dir)
         return people
-
     for pdir in person_dirs:
-        name = pdir.name
         images = [p for p in sorted(pdir.rglob("*")) if p.is_file() and is_supported_image(p)]
-        person = PersonReference(name=name, prototype=None, total_images=len(images))
-
-        det_scores: List[float] = []
-        face_fracs: List[float] = []
-
-        for img_path in images:
-            bgr = load_image_bgr(img_path, max_long_edge=cfg.max_long_edge)
-            if bgr is None:
-                continue
-            img_area = float(bgr.shape[0] * bgr.shape[1])
-            faces = engine.embed_faces(bgr)
-
-            if not faces:
-                person.zero_face_images += 1
-                continue
-            if len(faces) > 1:
-                person.multi_face_images += 1
-
-            best = _pick_best_face(faces)
-            person.embeddings.append(best.embedding)
-            person.usable_images += 1
-            det_scores.append(best.det_score)
-            face_fracs.append(best.bbox_area / img_area if img_area else 0.0)
-
-        if person.embeddings:
-            proto = np.mean(np.vstack(person.embeddings), axis=0)
-            proto = proto / (np.linalg.norm(proto) + 1e-9)
-            person.prototype = proto.astype(np.float32)
-            person.avg_det_score = float(np.mean(det_scores))
-            person.avg_face_frac = float(np.mean(face_fracs))
-            person.consistency = _consistency(person.embeddings)
-
-        _rate(person, cfg)
-        people[name] = person
-
+        people[pdir.name] = enroll_person(pdir.name, images, engine, cfg)
     return people
+
+
+def resolve_ref_items(items: Iterable[Path]) -> Dict[str, List[Path]]:
+    """Expand ``--of`` arguments into one-or-more people.
+
+    Rules (documented in the spec):
+      * a bare image  -> joins the "loose" bucket
+      * a folder with images directly inside -> one person named after the
+        folder; any child subfolders become their own people too
+      * a folder with ONLY subfolders      -> each subfolder is one person
+      * bare-image loose bucket            -> ONE person, named after the first
+        image's stem (caller may rename via --name)
+    Returns name -> sorted list of image paths, dropping empties.
+    """
+    people: Dict[str, List[Path]] = {}
+    loose: List[Path] = []
+
+    for item in items:
+        if item.is_file() and is_supported_image(item):
+            loose.append(item)
+        elif item.is_dir():
+            direct = sorted(
+                p for p in item.iterdir() if p.is_file() and is_supported_image(p)
+            )
+            subs = sorted(p for p in item.iterdir() if p.is_dir())
+            if not direct and subs:
+                for sd in subs:
+                    people[sd.name] = sorted(
+                        p for p in sd.rglob("*") if p.is_file() and is_supported_image(p)
+                    )
+            else:
+                if direct:
+                    people.setdefault(item.name, []).extend(direct)
+                for sd in subs:
+                    people[sd.name] = sorted(
+                        p for p in sd.rglob("*") if p.is_file() and is_supported_image(p)
+                    )
+        else:
+            console.warn(f"Ignoring non-image, non-folder reference: {item}")
+
+    if loose:
+        name = loose[0].stem
+        if name in people:  # collision between a bare file and a folder name
+            name = f"{name}_ref"
+        people[name] = loose + people.get(name, [])
+
+    return OrderedDict((k, v) for k, v in people.items() if v)
+
+
+def references_dir(central: Path, recipe: str) -> Path:
+    """Where per-person prototype files for one recipe live."""
+    return central / "references" / recipe
+
+
+def person_cache_path(central: Path, recipe: str, name: str) -> Path:
+    """The on-disk cache file for one person's prototype + metrics."""
+    return references_dir(central, recipe) / f"{name}.json"
+
+
+def save_person(person: PersonReference, central: Path, recipe: str) -> None:
+    """Persist one person's prototype/metrics, model-scoped and content-keyed."""
+    d = asdict(person)
+    d.pop("embeddings", None)
+    d["prototype"] = None if person.prototype is None else person.prototype.tolist()
+    path = person_cache_path(central, recipe, person.name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(d), encoding="utf-8")
+
+
+def load_cached_person(
+    central: Path, recipe: str, name: str, expected_key: str
+) -> Optional[PersonReference]:
+    """Load a person if a cached prototype matches the current sample set.
+
+    Returns None when the file is absent, unreadable, or its samples_key no
+    longer matches -- the caller then re-enrolls.
+    """
+    path = person_cache_path(central, recipe, name)
+    if not path.exists():
+        return None
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if d.get("samples_key") != expected_key:
+        return None
+    person = PersonReference(
+        name=name,
+        prototype=None if d.get("prototype") is None
+        else np.asarray(d["prototype"], dtype=np.float32),
+        samples_key=d.get("samples_key", ""),
+        total_images=d.get("total_images", 0),
+        usable_images=d.get("usable_images", 0),
+        multi_face_images=d.get("multi_face_images", 0),
+        zero_face_images=d.get("zero_face_images", 0),
+        avg_det_score=d.get("avg_det_score", 0.0),
+        avg_face_frac=d.get("avg_face_frac", 0.0),
+        consistency=d.get("consistency", 0.0),
+        rating=d.get("rating", "Poor"),
+        advice=d.get("advice", []),
+    )
+    return person
 
 
 def format_report(people: Dict[str, PersonReference]) -> str:
