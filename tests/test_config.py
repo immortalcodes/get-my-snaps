@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
-from get_my_snaps.config import Config, Paths
+from get_my_snaps.config import (
+    Config,
+    Paths,
+    default_central_dir,
+    default_model_root,
+)
 
 
 def test_defaults_are_recall_first():
     cfg = Config()
     assert cfg.threshold == 0.28
-    assert cfg.model_name == "buffalo_l"
+    assert cfg.model_name == "buffalo_s"
 
 
 def test_json_file_overrides_defaults(tmp_path):
@@ -21,7 +27,7 @@ def test_json_file_overrides_defaults(tmp_path):
 
     assert cfg.threshold == 0.5          # known key applied
     assert not hasattr(cfg, "unknown_key")  # unknown key ignored
-    assert cfg.model_name == "buffalo_l"    # untouched default preserved
+    assert cfg.model_name == "buffalo_s"    # untouched default preserved
 
 
 def test_with_overrides_ignores_none():
@@ -40,15 +46,36 @@ def test_precedence_flags_beat_file(tmp_path):
     assert cfg.threshold == 0.6  # CLI flag wins over file
 
 
-def test_paths_anchor_on_cwd(tmp_cwd):
-    # Paths anchors on the working directory at import time, so reload the
-    # module after chdir to observe the new root.
-    import importlib
+def test_paths_for_run_layout(tmp_path):
+    src = tmp_path / "input"
+    out = tmp_path / "out"
+    p = Paths.for_run(source=src, out=out, central=tmp_path / "c", model_root=tmp_path / "m")
+    assert p.source == src
+    assert p.state_dir == out / ".gms"
+    assert p.checkpoint == out / ".gms" / "checkpoint.json"
+    assert p.embeddings_cache == out / ".gms" / "embeddings"
+    assert p.manifest == out / "manifest.csv"
+    assert p.candidates == out / "candidates.csv"
 
-    import get_my_snaps.config as config_module
 
-    config_module = importlib.reload(config_module)
-    paths = config_module.Paths()
-    assert paths.input == tmp_cwd / "input"
-    assert paths.output == tmp_cwd / "output"
-    assert paths.manifest == tmp_cwd / "output" / "manifest.csv"
+def test_default_model_root_reuses_insightface(tmp_path, monkeypatch):
+    legacy = tmp_path / ".insightface"
+    (legacy / "models").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.delenv("GMS_MODEL_DIR", raising=False)
+    monkeypatch.delenv("SNAP_USER_COMMON", raising=False)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    assert default_model_root() == legacy
+
+
+def test_default_central_dir_from_xdg(tmp_path, monkeypatch):
+    monkeypatch.delenv("GMS_CACHE_DIR", raising=False)
+    monkeypatch.delenv("SNAP_USER_COMMON", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    assert default_central_dir() == tmp_path / "get-my-snaps"
+
+
+def test_central_dir_snap_wins(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMS_CACHE_DIR", str(tmp_path / "forced"))
+    monkeypatch.setenv("SNAP_USER_COMMON", str(tmp_path / "snap"))
+    assert default_central_dir() == tmp_path / "forced"
