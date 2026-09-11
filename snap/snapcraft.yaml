@@ -1,6 +1,6 @@
 name: get-my-snaps
 base: core24
-version: '0.1.0'
+version: '1.0.0'
 summary: Local, offline face-recognition photo filter
 description: |
   Copies every photo containing a chosen person from a source folder into an

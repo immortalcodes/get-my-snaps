@@ -14,9 +14,13 @@ Key facts (teaching notes):
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
+import sys
+import warnings
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -35,6 +39,43 @@ except Exception as exc:  # pragma: no cover - environment dependent
     )
 
 log = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def _quiet_native_io(enabled: bool = True) -> Iterator[None]:
+    """Silence stdout/stderr written by native code (onnxruntime/InsightFace).
+
+    InsightFace and onnxruntime write directly to file descriptors 1/2 (bare
+    ``print()`` calls in InsightFace, C++ logging in onnxruntime) rather than
+    through Python's ``logging`` module, so redirecting ``sys.stdout``/
+    ``sys.stderr`` objects has no effect on them. The only reliable way to
+    silence this is to swap the underlying OS file descriptors for the
+    duration of the call, then restore them.
+
+    When ``enabled`` is False this is a no-op passthrough (used for
+    ``--verbose``, so raw InsightFace/onnxruntime output is visible for
+    debugging).
+    """
+    if not enabled:
+        yield
+        return
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+    saved_stdout_fd = os.dup(1)
+    saved_stderr_fd = os.dup(2)
+    try:
+        with open(os.devnull, "wb") as devnull:
+            os.dup2(devnull.fileno(), 1)
+            os.dup2(devnull.fileno(), 2)
+        yield
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(saved_stdout_fd, 1)
+        os.dup2(saved_stderr_fd, 2)
+        os.close(saved_stdout_fd)
+        os.close(saved_stderr_fd)
 
 
 def model_available(model_root: Optional[Path], model_name: str) -> bool:
@@ -131,24 +172,61 @@ class FaceEngine:
         det_size: int = 640,
         det_thresh: float = 0.35,
         model_root: Optional[Path] = None,
+        verbose: bool = False,
     ):
         # Imported lazily so `--help` and arg parsing don't pay the heavy import cost.
-        from insightface.app import FaceAnalysis
 
         # model_name is required: Config is the single source of truth for which
         # model to use. model_root redirects where weights live -- essential
         # under snap strict confinement, where ~/.insightface is unwritable.
         root = str(model_root) if model_root is not None else "~/.insightface"
         log.info("Loading InsightFace model '%s' (CPU) from %s ...", model_name, root)
-        # we only use detection + recognition; no alignment or segmentation.
-        self.app = FaceAnalysis(
-            name=model_name,
-            root=root,
-            providers=["CPUExecutionProvider"],
-            allowed_modules=["detection", "recognition"],
-        )
-        # ctx_id=-1 forces CPU. det_thresh is intentionally a bit low to favor recall.
-        self.app.prepare(ctx_id=-1, det_size=(det_size, det_size), det_thresh=det_thresh)
+
+        if not verbose:
+            # InsightFace's face-alignment code calls a scikit-image API
+            # that's deprecated since skimage 0.26 (FutureWarning); harmless,
+            # but noisy on every run. skimage raises it with a stacklevel that
+            # attributes it to the *caller* (insightface.utils.face_align), so
+            # filtering by `module` would need to match that caller, not
+            # "skimage" -- simpler and more robust to match on the message.
+            warnings.filterwarnings(
+                "ignore",
+                category=FutureWarning,
+                message=r".*estimate.*deprecated.*",
+            )
+            # Pre-fetch the model weights *unsuppressed* so the one-time download
+            # progress bar (InsightFace's own tqdm output) stays visible, before
+            # we silence the noisy-but-harmless construction/prepare() below.
+            try:
+                from insightface.utils import ensure_available
+
+                ensure_available("models", model_name, root=root)
+            except Exception:  # pragma: no cover - best-effort only
+                pass
+
+        # onnxruntime/InsightFace write noisy diagnostics straight to the
+        # process's stdout/stderr file descriptors during model construction:
+        # onnxruntime's GPU/NPU device-discovery probes (denied under snap
+        # strict confinement, since we never request non-CPU providers anyway),
+        # per-model thread-pool creation errors (pthread_setaffinity_np denied
+        # under confinement), and InsightFace's own bare print() calls ("find
+        # model:", "model ignore:", "Applied providers:", "set det-size:").
+        # All cosmetic -- we only ever use providers=["CPUExecutionProvider"]
+        # and ctx_id=-1 below. Suppressed unless --verbose.
+        with _quiet_native_io(enabled=not verbose):
+            from insightface.app import FaceAnalysis
+
+            # we only use detection + recognition; no alignment or segmentation.
+            self.app = FaceAnalysis(
+                name=model_name,
+                root=root,
+                providers=["CPUExecutionProvider"],
+                allowed_modules=["detection", "recognition"],
+            )
+            # ctx_id=-1 forces CPU. det_thresh is a bit low to favor recall.
+            self.app.prepare(
+                ctx_id=-1, det_size=(det_size, det_size), det_thresh=det_thresh
+            )
         self.model_name = model_name
 
     def embed_faces(self, image_bgr: np.ndarray) -> List[DetectedFace]:

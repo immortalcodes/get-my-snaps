@@ -16,6 +16,7 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
+*.snap
 
 # The output tree is generated; keep the folder but not its contents.
 output/*

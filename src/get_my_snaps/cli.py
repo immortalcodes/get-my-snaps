@@ -389,6 +389,7 @@ def main() -> int:
         det_size=cfg.det_size,
         det_thresh=cfg.det_thresh,
         model_root=paths.model_root,
+        verbose=args.verbose,
     )
 
     reference_dir = cwd / "reference"
