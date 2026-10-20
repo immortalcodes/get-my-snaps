@@ -1,10 +1,18 @@
 # get-my-snaps
 
+[![CI](https://github.com/immortalcodes/get-my-snaps/actions/workflows/ci.yml/badge.svg)](https://github.com/immortalcodes/get-my-snaps/actions/workflows/ci.yml)
+[![get-my-snaps](https://snapcraft.io/get-my-snaps/badge.svg)](https://snapcraft.io/get-my-snaps)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Local, fully-offline tool that finds every photo containing a specific person and
 copies it into an output folder, preserving the original folder structure. It uses
 face recognition ([InsightFace](https://github.com/deepinsight/insightface)
 `buffalo_s`) running on CPU via ONNX Runtime. After a one-time model fetch
 (~160 MB) it needs no internet and sends no data anywhere.
+
+![demo](docs/demo/demo.svg)
+
+*Demo: find one astronaut in a folder of 15 public-domain NASA photos (source: Wikimedia Commons). Replay it in a terminal with `asciinema play docs/demo/demo.cast`.*
 
 ## Install
 
@@ -175,11 +183,28 @@ the wrong embeddings.
   cosine similarity; if any face scores at or above `--threshold`, the photo is
   a match.
 
+## Performance
+
+Measured on the demo set above (15 images, longest side about 1,000 px), an Intel Core Ultra 7 265U laptop CPU, `buffalo_s`, no GPU:
+
+| Run | Time |
+|-----|------|
+| Cold run (detect + embed 15 images, including startup) | ~3.4 s |
+| Re-score from the embedding cache (`--threshold` change) | ~0.8 s |
+
+Result on that set: **10 of the 11** photos of the target person matched, with **0 false positives** among the 4 other photos
+(the miss scored 0.169, below the 0.28 threshold; it shows up in `candidates.csv`).
+This is a small sample, not a benchmark. Full-size camera photos (12 MP+) take longer
+to decode, so expect more per image than shown here.
+
 ## Notes & limitations
 
-- CPU-only by design. Expect roughly 0.2–0.5 s/image with `buffalo_s`.
+- CPU-only by design. See [Performance](#performance) for measured timings.
 - Very small, blurry, heavily side-profile, or sunglasses-obscured faces are
-  harder to match — reflected in the reference quality score.
+  harder to match — reflected in the reference quality score. In a quick test on
+  1960s film photos where the subject often wears a helmet, a single reference
+  photo matched nothing, so use several clear, front-facing references for
+  difficult material.
 - The pretrained models are available for **non-commercial research**; the tool
   downloads them on first use rather than bundling them.
 - Originals are **copied, not moved**; the source folder is never modified.
