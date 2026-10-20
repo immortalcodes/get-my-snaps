@@ -11,6 +11,7 @@ description: |
 
   Run-state lives under the output dir (<out>/.gms/); the model and reference
   prototypes live in $SNAP_USER_COMMON so they're shared and survive refreshes.
+license: MIT
 grade: stable
 confinement: strict
 
